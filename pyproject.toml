@@ -1,0 +1,16 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "emload-downloader"
+version = "0.1.0"
+description = "Emload bulk downloader"
+requires-python = ">=3.10"
+dependencies = [
+  "playwright",
+]
+
+[tool.setuptools]
+package-dir = {"" = "src"}
+packages = ["emload_downloader"]

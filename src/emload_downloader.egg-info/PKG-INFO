@@ -1,0 +1,8 @@
+Metadata-Version: 2.4
+Name: emload-downloader
+Version: 0.1.0
+Summary: Emload bulk downloader
+Requires-Python: >=3.10
+License-File: LICENSE
+Requires-Dist: playwright
+Dynamic: license-file
