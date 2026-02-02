@@ -125,6 +125,10 @@ class StateManager:
         with self.lock:
             return len(self.state.get("completed", {}))
 
+    def failed_count(self) -> int:
+        with self.lock:
+            return len(self.state.get("failed", {}))
+
     def _append_download_log(self, idx: int, filename: str) -> None:
         log_path = self.download_dir / "downloaded.txt"
         log_path.parent.mkdir(parents=True, exist_ok=True)

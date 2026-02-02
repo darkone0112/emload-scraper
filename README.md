@@ -15,6 +15,7 @@ Create and activate a virtual environment, then install dependencies:
 python -m venv venv
 source venv/bin/activate
 pip install -r requirements.txt
+pip install -e .
 python -m playwright install
 ```
 
@@ -57,6 +58,11 @@ sudo pacman -S --needed \
   nss \
   pango \
   zlib
+```
+
+If `sudo playwright install-deps` fails with "command not found", run it via the venv python:
+```
+sudo ./venv/bin/python -m playwright install-deps
 ```
 
 ## Quick Start

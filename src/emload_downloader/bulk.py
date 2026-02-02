@@ -126,6 +126,65 @@ class BandwidthLimiter:
                 print(f"Bandwidth limit detected ({reason}). Sleeping {sleep_s}s.")
 
 
+@dataclass
+class WorkerStatus:
+    idx: Optional[int] = None
+    state: str = "idle"
+    attempt: int = 0
+    updated_ts: float = 0.0
+
+
+def _update_status(
+    statuses: dict[str, WorkerStatus],
+    status_lock: threading.Lock,
+    name: str,
+    *,
+    idx: Optional[int] = None,
+    state: Optional[str] = None,
+    attempt: Optional[int] = None,
+) -> None:
+    with status_lock:
+        st = statuses[name]
+        if idx is not None:
+            st.idx = idx
+        if state is not None:
+            st.state = state
+        if attempt is not None:
+            st.attempt = attempt
+        st.updated_ts = time.time()
+
+
+def _progress_loop(
+    stop_event: threading.Event,
+    q: "queue.Queue[Optional[Tuple[int, str]]]",
+    state: StateManager,
+    limiter: BandwidthLimiter,
+    statuses: dict[str, WorkerStatus],
+    status_lock: threading.Lock,
+    print_lock: threading.Lock,
+    interval_s: int = 10,
+) -> None:
+    while not stop_event.wait(interval_s):
+        with status_lock:
+            items = [
+                f"{name}:{st.state}"
+                + (f":{st.idx:04d}" if st.idx is not None else "")
+                + (f":a{st.attempt}" if st.attempt else "")
+                for name, st in statuses.items()
+            ]
+        with print_lock:
+            used = state.get_daily_bytes()
+            completed = state.completed_count()
+            failed = state.failed_count()
+            pending = q.qsize()
+            print(
+                "Status | "
+                f"pending={pending} completed={completed} failed={failed} "
+                f"daily={used / 1_000_000_000:.2f} GB | "
+                + " ".join(items)
+            )
+
+
 def _worker_loop(
     name: str,
     task_queue: "queue.Queue[Optional[Tuple[int, str]]]",
@@ -135,6 +194,8 @@ def _worker_loop(
     cfg: BulkConfig,
     print_lock: threading.Lock,
     existing: dict[int, Path],
+    statuses: dict[str, WorkerStatus],
+    status_lock: threading.Lock,
 ) -> None:
     with sync_playwright() as p:
         browser = p.chromium.launch(headless=cfg.headless)
@@ -145,11 +206,14 @@ def _worker_loop(
         while True:
             item = task_queue.get()
             if item is None:
+                _update_status(statuses, status_lock, name, state="stopped", idx=None, attempt=0)
                 task_queue.task_done()
                 break
 
             idx, url = item
+            _update_status(statuses, status_lock, name, state="start", idx=idx, attempt=0)
             if state.is_done(idx):
+                _update_status(statuses, status_lock, name, state="skip-done", idx=idx)
                 task_queue.task_done()
                 continue
             if idx in existing:
@@ -161,13 +225,16 @@ def _worker_loop(
                 state.mark_done(idx, url, existing_path.name, size, log_download=False)
                 with print_lock:
                     print(f"[{name}] skip existing idx={idx:04d} file={existing_path.name}")
+                _update_status(statuses, status_lock, name, state="skip-existing", idx=idx)
                 task_queue.task_done()
                 continue
 
             attempt = 0
             while attempt < cfg.retries:
+                _update_status(statuses, status_lock, name, state="waiting-budget", idx=idx, attempt=attempt + 1)
                 limiter.wait_for_budget()
                 try:
+                    _update_status(statuses, status_lock, name, state="downloading", idx=idx, attempt=attempt + 1)
                     path = download_one(
                         page,
                         url=url,
@@ -185,20 +252,24 @@ def _worker_loop(
                             f"[{name}] done idx={idx:04d} size={size}B "
                             f"daily={used / 1_000_000_000:.2f} GB"
                         )
+                    _update_status(statuses, status_lock, name, state="done", idx=idx, attempt=attempt + 1)
                     if cfg.delay_s:
                         time.sleep(cfg.delay_s)
                     break
                 except BandwidthLimitError as exc:
                     limiter.trigger_pause(str(exc))
+                    _update_status(statuses, status_lock, name, state="bandwidth-limit", idx=idx, attempt=attempt + 1)
                     continue
                 except Exception as exc:  # pragma: no cover - runtime errors
                     attempt += 1
                     state.mark_failed(idx, url, str(exc), attempt)
                     with print_lock:
                         print(f"[{name}] failed idx={idx:04d} attempt={attempt} err={exc}")
+                    _update_status(statuses, status_lock, name, state="failed", idx=idx, attempt=attempt)
                     if attempt < cfg.retries:
                         time.sleep(min(10, 2 * attempt))
 
+            _update_status(statuses, status_lock, name, state="idle", idx=None, attempt=0)
             task_queue.task_done()
 
         browser.close()
@@ -263,11 +334,32 @@ def run_bulk_download(
     with print_lock:
         print(f"Queue size: {pending} | workers: {workers}")
 
+    status_lock = threading.Lock()
+    statuses = {f"W{i+1}": WorkerStatus(updated_ts=time.time()) for i in range(workers)}
+    stop_event = threading.Event()
+    progress_thread = threading.Thread(
+        target=_progress_loop,
+        args=(stop_event, q, state, limiter, statuses, status_lock, print_lock),
+        daemon=True,
+    )
+    progress_thread.start()
+
     threads = []
     for i in range(workers):
         t = threading.Thread(
             target=_worker_loop,
-            args=(f"W{i+1}", q, cookies, state, limiter, cfg, print_lock, existing),
+            args=(
+                f"W{i+1}",
+                q,
+                cookies,
+                state,
+                limiter,
+                cfg,
+                print_lock,
+                existing,
+                statuses,
+                status_lock,
+            ),
             daemon=True,
         )
         t.start()
@@ -278,6 +370,8 @@ def run_bulk_download(
         q.put(None)
     for t in threads:
         t.join()
+    stop_event.set()
+    progress_thread.join(timeout=1)
 
     with print_lock:
         print("Bulk download finished.")
