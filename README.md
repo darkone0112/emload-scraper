@@ -1,4 +1,4 @@
-# Emload Bulk Downloader
+# Emload Scraper/Downloader
 
 This project automates scraping Emload listing pages and downloading all files with resume support and a daily bandwidth cap.
 
