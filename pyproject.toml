@@ -9,6 +9,7 @@ description = "Emload bulk downloader"
 requires-python = ">=3.10"
 dependencies = [
   "playwright",
+  "rich",
 ]
 
 [tool.setuptools]
