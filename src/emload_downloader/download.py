@@ -8,6 +8,7 @@ from typing import Optional, Sequence, Tuple, Union
 from playwright.sync_api import Page, TimeoutError, sync_playwright
 
 from emload_downloader.cookies import load_playwright_cookies
+from emload_downloader.ui import print_line
 
 EMLOAD_LINK_RE = re.compile(r"^https?://(?:www\.)?emload\.com/v2/file/[^/]+/(\d+)-")
 
@@ -170,5 +171,5 @@ def run_download_one(
 
         browser.close()
 
-    print(f"Downloaded: {path}")
+    print_line(f"Downloaded: {path}")
     return path

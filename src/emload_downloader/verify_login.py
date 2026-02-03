@@ -6,12 +6,14 @@ from typing import Union
 from playwright.sync_api import sync_playwright
 
 from emload_downloader.cookies import load_playwright_cookies
+from emload_downloader.ui import input_line, print_line
 
 
 def verify_login(
     cookies_path: Union[str, Path],
     test_url: str = "https://www.emload.com/",
     headless: bool = False,
+    timeout_ms: int = 60000,
 ) -> None:
     cookies = load_playwright_cookies(cookies_path)
 
@@ -21,10 +23,10 @@ def verify_login(
         context.add_cookies(cookies)
 
         page = context.new_page()
-        page.goto(test_url, wait_until="networkidle")
+        page.goto(test_url, wait_until="networkidle", timeout=timeout_ms)
 
-        print("Check the browser: if you are logged in, cookies injection works.")
-        input("Press Enter to close...")
+        print_line("Check the browser: if you are logged in, cookies injection works.")
+        input_line("Press Enter to close...")
 
         browser.close()
 

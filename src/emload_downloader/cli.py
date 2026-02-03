@@ -33,6 +33,12 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Run browser in headless mode (not recommended for manual check).",
     )
+    verify.add_argument(
+        "--timeout-ms",
+        type=int,
+        default=60000,
+        help="Timeout for initial page load (ms).",
+    )
 
     scrape = sub.add_parser("scrape", help="Scrape listing page for v2/file links.")
     scrape.add_argument("--list-url", required=True, help="Listing page URL.")
@@ -181,7 +187,12 @@ def main() -> None:
         run_menu()
         return
     if args.command == "verify-login":
-        verify_login(args.cookies, args.url, headless=args.headless)
+        verify_login(
+            args.cookies,
+            args.url,
+            headless=args.headless,
+            timeout_ms=args.timeout_ms,
+        )
     elif args.command == "scrape":
         run_scrape(args.list_url, args.cookies, args.out, headless=args.headless)
     elif args.command == "download-one":

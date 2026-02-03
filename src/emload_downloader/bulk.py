@@ -1,13 +1,12 @@
 from __future__ import annotations
 
-import json
 import queue
 import threading
 import time
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from pathlib import Path
-from typing import Iterable, List, Optional, Tuple
+from typing import List, Optional, Tuple
 
 try:
     from rich.console import Console, Group
@@ -30,64 +29,21 @@ from playwright.sync_api import sync_playwright
 
 from emload_downloader.cookies import load_playwright_cookies
 from emload_downloader.download import BandwidthLimitError, download_one
+from emload_downloader.links import existing_downloads, filter_range, load_links
 from emload_downloader.state import StateManager
-
-
-def _load_links(path: Path) -> List[Tuple[int, str]]:
-    data = json.loads(path.read_text(encoding="utf-8"))
-    if not isinstance(data, list):
-        raise ValueError(f"Invalid links format in {path}")
-    pairs: List[Tuple[int, str]] = []
-    for item in data:
-        if not isinstance(item, dict):
-            continue
-        idx = item.get("idx")
-        url = item.get("url")
-        if isinstance(idx, int) and isinstance(url, str):
-            pairs.append((idx, url))
-    if not pairs:
-        raise ValueError(f"No links found in {path}")
-    return sorted(pairs, key=lambda x: x[0])
-
-
-def _existing_downloads(out_dir: Path) -> dict[int, Path]:
-    existing: dict[int, Path] = {}
-    if not out_dir.exists():
-        return existing
-    for entry in out_dir.iterdir():
-        if not entry.is_file():
-            continue
-        name = entry.name
-        if name == "downloaded.txt":
-            continue
-        if "_" not in name:
-            continue
-        prefix = name.split("_", 1)[0]
-        if not prefix.isdigit():
-            continue
-        existing[int(prefix)] = entry
-    return existing
-
-
-def _filter_range(
-    pairs: Iterable[Tuple[int, str]],
-    start: Optional[int],
-    end: Optional[int],
-) -> List[Tuple[int, str]]:
-    out = []
-    for idx, url in pairs:
-        if start is not None and idx < start:
-            continue
-        if end is not None and idx > end:
-            continue
-        out.append((idx, url))
-    return out
 
 
 def _seconds_until_next_midnight() -> int:
     now = datetime.now()
     tomorrow = (now + timedelta(days=1)).replace(hour=0, minute=0, second=0, microsecond=0)
     return max(1, int((tomorrow - now).total_seconds()))
+
+
+def _format_size_mb_gb(size_bytes: int) -> str:
+    size_mb = size_bytes / (1024 * 1024)
+    if size_mb >= 1024:
+        return f"{size_mb / 1024:.2f} GB"
+    return f"{size_mb:.2f} MB"
 
 
 @dataclass
@@ -382,6 +338,7 @@ def _worker_loop(
                     size = existing_path.stat().st_size
                 except OSError:
                     size = 0
+                size_label = _format_size_mb_gb(size)
                 state.mark_done(idx, url, existing_path.name, size, log_download=False)
                 msg = f"[{name}] skip existing idx={idx:04d} file={existing_path.name}"
                 if ui:
@@ -395,7 +352,7 @@ def _worker_loop(
                     name,
                     state="skip-existing",
                     idx=idx,
-                    last_result="skip-existing",
+                    last_result=f"skip-existing {size_label}",
                 )
                 with counters_lock:
                     counters.completed += 1
@@ -419,12 +376,13 @@ def _worker_loop(
                         timeout_ms=cfg.timeout_ms,
                     )
                     size = path.stat().st_size
+                    size_label = _format_size_mb_gb(size)
                     state.mark_done(idx, url, path.name, size)
                     state.add_daily_bytes(size)
                     duration = max(0.1, time.time() - statuses[name].start_ts)
                     speed_mbps = (size / 1_000_000) / duration
                     msg = (
-                        f"[{name}] done idx={idx:04d} size={size}B "
+                        f"[{name}] done idx={idx:04d} size={size_label} "
                         f"speed={speed_mbps:.2f} MB/s"
                     )
                     if ui:
@@ -440,7 +398,7 @@ def _worker_loop(
                         state="done",
                         idx=idx,
                         attempt=attempt + 1,
-                        last_result="done",
+                        last_result=f"done {size_label}",
                         last_speed_mbps=speed_mbps,
                     )
                     with counters_lock:
@@ -510,8 +468,8 @@ def run_bulk_download(
     timeout_ms: int,
     daily_limit_gb: float,
 ) -> None:
-    links = _load_links(links_path)
-    links = _filter_range(links, start, end)
+    links = load_links(links_path)
+    links = filter_range(links, start, end)
     if not links:
         print("No links to process after filtering.")
         return
@@ -537,7 +495,7 @@ def run_bulk_download(
 
     print_lock = threading.Lock()
 
-    existing = _existing_downloads(out_dir)
+    existing = existing_downloads(out_dir)
     q: "queue.Queue[Optional[Tuple[int, str]]]" = queue.Queue()
     pending = 0
     for idx, url in links:

@@ -9,6 +9,7 @@ from urllib.parse import urljoin
 from playwright.sync_api import Page, sync_playwright
 
 from emload_downloader.cookies import load_playwright_cookies
+from emload_downloader.ui import print_line
 
 EMLOAD_LINK_RE = re.compile(r"^https?://(?:www\.)?emload\.com/v2/file/[^/]+/(\d+)-")
 
@@ -93,15 +94,15 @@ def run_scrape(
     indices = [idx for idx, _ in pairs]
     gaps = _find_gaps(indices)
     if indices:
-        print(
+        print_line(
             f"Scraped {len(pairs)} links. "
             f"Min idx={indices[0]} Max idx={indices[-1]} Gaps={len(gaps)}"
         )
     else:
-        print("No emload links found. Check LIST_URL or login status.")
+        print_line("No emload links found. Check LIST_URL or login status.")
 
     if gaps:
-        print(f"Missing indices (first 20): {gaps[:20]}")
+        print_line(f"Missing indices (first 20): {gaps[:20]}")
 
-    print(f"Wrote: {out_path}")
+    print_line(f"Wrote: {out_path}")
     return pairs

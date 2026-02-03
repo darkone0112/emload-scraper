@@ -5,7 +5,7 @@ import threading
 import time
 from datetime import date
 from pathlib import Path
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Iterable, Optional
 
 
 def _now_ts() -> str:
@@ -120,6 +120,17 @@ class StateManager:
             }
             self.state["last_run_ts"] = _now_ts()
             self._save_locked()
+
+    def clear_completed(self, indices: Iterable[int]) -> int:
+        removed = 0
+        with self.lock:
+            completed = self.state.setdefault("completed", {})
+            for idx in indices:
+                if completed.pop(str(idx), None) is not None:
+                    removed += 1
+            if removed:
+                self._save_locked()
+        return removed
 
     def completed_count(self) -> int:
         with self.lock:
