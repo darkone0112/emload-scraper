@@ -249,7 +249,9 @@ class ProgressUI:
             f"skipped={self.counters.skipped} daily={used / 1_000_000_000:.2f} GB"
         )
 
-        return Group(self.progress, Table.grid().add_row(summary), table)
+        summary_grid = Table.grid()
+        summary_grid.add_row(summary)
+        return Group(self.progress, summary_grid, table)
 
 
 def _progress_loop(
