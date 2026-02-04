@@ -1,7 +1,6 @@
 from __future__ import annotations
 
-from pathlib import Path
-from typing import Optional
+from typing import Callable, Optional
 
 from emload_downloader.bulk import run_bulk_download
 from emload_downloader.jobs import (
@@ -12,6 +11,7 @@ from emload_downloader.jobs import (
     list_jobs,
     sanitize_job_name,
 )
+from emload_downloader.paths import choose_cookie_path
 from emload_downloader.scrape import run_scrape
 from emload_downloader.ui import prompt, prompt_bool, print_line
 
@@ -19,22 +19,25 @@ from emload_downloader.ui import prompt, prompt_bool, print_line
 def _choose_job(jobs: list[str]) -> Optional[str]:
     if not jobs:
         return None
-    for i, name in enumerate(jobs, 1):
-        print_line(f"{i}. {name}")
-    choice = prompt("Select job by number or name")
-    if not choice:
-        return None
-    if choice.isdigit():
-        idx = int(choice)
-        if 1 <= idx <= len(jobs):
-            return jobs[idx - 1]
-    if choice in jobs:
-        return choice
-    print_line("Invalid selection.")
-    return None
+    while True:
+        for i, name in enumerate(jobs, 1):
+            print_line(f"{i}. {name}")
+        choice = prompt("Select job by number or name")
+        if not choice:
+            return None
+        if choice.isdigit():
+            idx = int(choice)
+            if 1 <= idx <= len(jobs):
+                return jobs[idx - 1]
+        if choice in jobs:
+            return choice
+        print_line("Invalid selection.")
 
 
-def run_wizard() -> None:
+def run_wizard(
+    render_target: Optional[Callable[[object, str], None]] = None,
+    log_sink: Optional[Callable[[str], None]] = None,
+) -> None:
     root = jobs_root()
     root.mkdir(parents=True, exist_ok=True)
     jobs = list_jobs()
@@ -42,7 +45,11 @@ def run_wizard() -> None:
     print_line("Wizard: scrape + bulk download")
     print_line("1) New scrape and download")
     print_line("2) Download existing job")
-    mode = prompt("Choose mode", "1")
+    while True:
+        mode = prompt("Choose mode", "1").strip()
+        if mode in {"1", "2"}:
+            break
+        print_line("Invalid option. Choose 1 or 2.")
 
     if mode.strip() == "2":
         if not jobs:
@@ -55,7 +62,7 @@ def run_wizard() -> None:
         if not links_path.exists():
             print_line(f"Missing links file: {links_path}")
             return
-        cookies_path = Path(prompt("Cookies path", "data/emload_cookies.json"))
+        cookies_path = choose_cookie_path()
         headless = prompt_bool("Headless browser?", True)
         last_idx = latest_download_idx(out_dir)
         if last_idx is not None:
@@ -77,6 +84,9 @@ def run_wizard() -> None:
             headless=headless,
             timeout_ms=30000,
             daily_limit_gb=35.0,
+            screen=False,
+            render_target=render_target,
+            log_sink=log_sink,
         )
         return
 
@@ -93,9 +103,8 @@ def run_wizard() -> None:
         return
     job_dir.mkdir(parents=True, exist_ok=True)
 
-    cookies_path = Path(prompt("Cookies path", "data/emload_cookies.json"))
+    cookies_path = choose_cookie_path()
     headless = prompt_bool("Headless browser?", True)
-
     run_scrape(list_url, cookies_path, links_path, headless=headless)
     run_bulk_download(
         links_path=links_path,
@@ -111,4 +120,7 @@ def run_wizard() -> None:
         headless=headless,
         timeout_ms=30000,
         daily_limit_gb=35.0,
+        screen=False,
+        render_target=render_target,
+        log_sink=log_sink,
     )

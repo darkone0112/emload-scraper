@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
-from typing import Iterable, List, Optional, Tuple
+from typing import Iterable, Iterator, List, Optional, Tuple
 
 
 def load_links(path: Path) -> List[Tuple[int, str]]:
@@ -20,6 +20,105 @@ def load_links(path: Path) -> List[Tuple[int, str]]:
     if not pairs:
         raise ValueError(f"No links found in {path}")
     return sorted(pairs, key=lambda x: x[0])
+
+
+def _iter_json_array(path: Path, chunk_size: int = 65536) -> Iterator[object]:
+    decoder = json.JSONDecoder()
+    with path.open("r", encoding="utf-8") as f:
+        buffer = ""
+        eof = False
+
+        def read_more() -> None:
+            nonlocal buffer, eof
+            chunk = f.read(chunk_size)
+            if chunk == "":
+                eof = True
+                return
+            buffer += chunk
+
+        read_more()
+        pos = 0
+
+        while True:
+            while pos < len(buffer) and buffer[pos].isspace():
+                pos += 1
+            if pos < len(buffer):
+                if buffer[pos] != "[":
+                    raise ValueError(f"Invalid links format in {path}")
+                pos += 1
+                break
+            if eof:
+                raise ValueError(f"Invalid links format in {path}")
+            read_more()
+
+        while True:
+            while True:
+                while pos < len(buffer) and buffer[pos].isspace():
+                    pos += 1
+                if pos < len(buffer):
+                    break
+                if eof:
+                    return
+                read_more()
+
+            if buffer[pos] == "]":
+                return
+
+            while True:
+                try:
+                    obj, next_pos = decoder.raw_decode(buffer, pos)
+                    pos = next_pos
+                    break
+                except json.JSONDecodeError:
+                    if eof:
+                        raise ValueError(f"Invalid links format in {path}")
+                    read_more()
+
+            yield obj
+
+            while True:
+                while pos < len(buffer) and buffer[pos].isspace():
+                    pos += 1
+                if pos < len(buffer):
+                    break
+                if eof:
+                    raise ValueError(f"Invalid links format in {path}")
+                read_more()
+
+            if buffer[pos] == ",":
+                pos += 1
+            elif buffer[pos] == "]":
+                return
+            else:
+                if eof:
+                    raise ValueError(f"Invalid links format in {path}")
+
+            if pos > 262144:
+                buffer = buffer[pos:]
+                pos = 0
+
+
+def iter_links(path: Path) -> Iterator[Tuple[int, str]]:
+    for item in _iter_json_array(path):
+        if not isinstance(item, dict):
+            continue
+        idx = item.get("idx")
+        url = item.get("url")
+        if isinstance(idx, int) and isinstance(url, str):
+            yield (idx, url)
+
+
+def iter_links_range(
+    path: Path,
+    start: Optional[int],
+    end: Optional[int],
+) -> Iterator[Tuple[int, str]]:
+    for idx, url in iter_links(path):
+        if start is not None and idx < start:
+            continue
+        if end is not None and idx > end:
+            continue
+        yield (idx, url)
 
 
 def filter_range(

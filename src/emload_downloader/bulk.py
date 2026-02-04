@@ -6,10 +6,11 @@ import time
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from pathlib import Path
-from typing import List, Optional, Tuple
+from typing import Callable, Iterable, List, Optional, Tuple
 
 try:
     from rich.console import Console, Group
+    from rich.layout import Layout
     from rich.live import Live
     from rich.progress import (
         BarColumn,
@@ -29,7 +30,7 @@ from playwright.sync_api import sync_playwright
 
 from emload_downloader.cookies import load_playwright_cookies
 from emload_downloader.download import BandwidthLimitError, download_one
-from emload_downloader.links import existing_downloads, filter_range, load_links
+from emload_downloader.links import existing_downloads, iter_links_range
 from emload_downloader.state import StateManager
 
 
@@ -44,6 +45,16 @@ def _format_size_mb_gb(size_bytes: int) -> str:
     if size_mb >= 1024:
         return f"{size_mb / 1024:.2f} GB"
     return f"{size_mb:.2f} MB"
+
+
+def _format_range_label(start: Optional[int], end: Optional[int]) -> str:
+    if start is None and end is None:
+        return "all"
+    if start is None:
+        return f"<= {end}"
+    if end is None:
+        return f">= {start}"
+    return f"{start} - {end}"
 
 
 @dataclass
@@ -173,11 +184,16 @@ class ProgressUI:
         statuses: dict[str, WorkerStatus],
         status_lock: threading.Lock,
         state: StateManager,
+        config_rows: Optional[list[tuple[str, str]]] = None,
+        screen: bool = False,
+        log_sink: Optional[Callable[[str], None]] = None,
     ) -> None:
         self.counters = counters
         self.statuses = statuses
         self.status_lock = status_lock
         self.state = state
+        self.screen = screen
+        self.log_sink = log_sink
         self.console = Console()
         self.progress = Progress(
             SpinnerColumn(),
@@ -187,13 +203,28 @@ class ProgressUI:
             TimeElapsedColumn(),
             TimeRemainingColumn(),
         )
+        self.config_table = None
+        if config_rows:
+            table = Table(show_header=True, header_style="bold", title="Run Settings")
+            table.add_column("Key", no_wrap=True)
+            table.add_column("Value", overflow="fold")
+            for key, value in config_rows:
+                table.add_row(key, value)
+            self.config_table = table
         self.task_id = self.progress.add_task("overall", total=counters.total, completed=counters.completed)
         self.live: Optional[Live] = None
         self.stop_event = threading.Event()
         self.thread: Optional[threading.Thread] = None
 
     def start(self) -> None:
-        self.live = Live(self._render(), console=self.console, refresh_per_second=4)
+        if self.screen:
+            self.console.clear()
+        self.live = Live(
+            self._render(),
+            console=self.console,
+            refresh_per_second=4,
+            screen=self.screen,
+        )
         self.live.__enter__()
         self.thread = threading.Thread(target=self._loop, daemon=True)
         self.thread.start()
@@ -206,10 +237,13 @@ class ProgressUI:
             self.live.__exit__(None, None, None)
 
     def log(self, msg: str) -> None:
+        if self.log_sink is not None:
+            self.log_sink(msg)
+            return
         if self.live:
             self.console.log(msg)
-        else:
-            print(msg)
+            return
+        print(msg)
 
     def update_counters(self) -> None:
         self.progress.update(self.task_id, completed=self.counters.completed, total=self.counters.total)
@@ -220,8 +254,11 @@ class ProgressUI:
                 self.update_counters()
                 self.live.update(self._render())
 
-    def _render(self) -> Group:
-        table = Table(show_header=True, header_style="bold")
+    def _render(self, width: Optional[int] = None) -> Group:
+        self.update_counters()
+        if width is None:
+            width = self.console.size.width
+        table = Table(show_header=True, header_style="bold", expand=True)
         table.add_column("Worker", no_wrap=True)
         table.add_column("State", no_wrap=True)
         table.add_column("Idx", no_wrap=True)
@@ -251,7 +288,21 @@ class ProgressUI:
 
         summary_grid = Table.grid()
         summary_grid.add_row(summary)
+        if self.config_table and width >= 120:
+            left = Group(self.config_table, self.progress, summary_grid)
+            layout = Layout()
+            layout.split_row(
+                Layout(left, name="left", ratio=2),
+                Layout(table, name="right", ratio=3),
+            )
+            return layout
+        if self.config_table:
+            return Group(self.config_table, self.progress, summary_grid, table)
         return Group(self.progress, summary_grid, table)
+
+    def __rich_console__(self, console: Console, options) -> Iterable:
+        renderable = self._render(console.size.width)
+        yield from console.render(renderable, options)
 
 
 def _progress_loop(
@@ -342,7 +393,7 @@ def _worker_loop(
                     size = 0
                 size_label = _format_size_mb_gb(size)
                 state.mark_done(idx, url, existing_path.name, size, log_download=False)
-                msg = f"[{name}] skip existing idx={idx:04d} file={existing_path.name}"
+                msg = f"[{name}] skip existing idx={idx:04d} size={size_label}"
                 if ui:
                     ui.log(msg)
                 else:
@@ -368,7 +419,28 @@ def _worker_loop(
                 _update_status(statuses, status_lock, name, state="waiting-budget", idx=idx, attempt=attempt + 1)
                 limiter.wait_for_budget()
                 try:
-                    _update_status(statuses, status_lock, name, state="downloading", idx=idx, attempt=attempt + 1)
+                    _update_status(
+                        statuses,
+                        status_lock,
+                        name,
+                        state="connecting",
+                        idx=idx,
+                        attempt=attempt + 1,
+                        last_result="opening page",
+                        last_speed_mbps=0.0,
+                    )
+                    def _progress_cb(size_bytes: int, speed_mbps: float) -> None:
+                        size_label = _format_size_mb_gb(size_bytes)
+                        _update_status(
+                            statuses,
+                            status_lock,
+                            name,
+                            state="downloading",
+                            idx=idx,
+                            last_speed_mbps=speed_mbps,
+                            last_result=f"downloading {size_label}",
+                        )
+
                     path = download_one(
                         page,
                         url=url,
@@ -376,6 +448,7 @@ def _worker_loop(
                         idx=idx,
                         selector=cfg.selector,
                         timeout_ms=cfg.timeout_ms,
+                        progress_cb=_progress_cb,
                     )
                     size = path.stat().st_size
                     size_label = _format_size_mb_gb(size)
@@ -469,16 +542,39 @@ def run_bulk_download(
     headless: bool,
     timeout_ms: int,
     daily_limit_gb: float,
+    screen: bool = False,
+    render_target: Optional[Callable[[object, str], None]] = None,
+    log_sink: Optional[Callable[[str], None]] = None,
 ) -> None:
-    links = load_links(links_path)
-    links = filter_range(links, start, end)
-    if not links:
-        print("No links to process after filtering.")
-        return
+    def log_msg(message: str) -> None:
+        if log_sink is not None:
+            log_sink(message)
+            return
+        print(message)
 
     cookies = load_playwright_cookies(cookies_path)
     state = StateManager(state_path, download_dir=out_dir)
     state.ensure_daily()
+
+    def count_links() -> tuple[int, int, int]:
+        total = 0
+        pending = 0
+        already_done = 0
+        for idx, _ in iter_links_range(links_path, start, end):
+            total += 1
+            if state.is_done(idx):
+                already_done += 1
+            else:
+                pending += 1
+        return total, pending, already_done
+
+    total_links, pending, already_done = count_links()
+    if total_links == 0:
+        log_msg("No links to process after filtering.")
+        return
+    if pending == 0:
+        log_msg("All items already completed.")
+        return
 
     limit_bytes = int(daily_limit_gb * 1_000_000_000)
     cfg = BulkConfig(
@@ -498,34 +594,39 @@ def run_bulk_download(
     print_lock = threading.Lock()
 
     existing = existing_downloads(out_dir)
-    q: "queue.Queue[Optional[Tuple[int, str]]]" = queue.Queue()
-    pending = 0
-    for idx, url in links:
-        if state.is_done(idx):
-            continue
-        q.put((idx, url))
-        pending += 1
-
-    if pending == 0:
-        print("All items already completed.")
-        return
-
-    with print_lock:
-        print(f"Queue size: {pending} | workers: {workers}")
+    queue_max = 100
+    q: "queue.Queue[Optional[Tuple[int, str]]]" = queue.Queue(maxsize=queue_max)
+    log_msg(f"Queue size: {pending} | workers: {workers}")
 
     status_lock = threading.Lock()
     statuses = {f"W{i+1}": WorkerStatus(updated_ts=time.time()) for i in range(workers)}
     counters_lock = threading.Lock()
-    already_done = sum(1 for idx, _ in links if state.is_done(idx))
-    total = pending + already_done
-    counters = RunCounters(total=total, completed=already_done)
+    counters = RunCounters(total=total_links, completed=already_done)
 
     use_rich = _HAS_RICH and Console().is_terminal
-    ui = ProgressUI(counters, statuses, status_lock, state) if use_rich else None
-    if ui:
-        ui.start()
+    config_rows = None
+    ui = None
+    if use_rich:
+        ui = ProgressUI(
+            counters,
+            statuses,
+            status_lock,
+            state,
+            config_rows=config_rows,
+            screen=screen,
+            log_sink=log_sink,
+        )
+        if render_target is not None:
+            render_target(ui, "Bulk Download")
+        else:
+            ui.start()
 
-    limiter = BandwidthLimiter(state, limit_bytes, print_lock, log_fn=ui.log if ui else None)
+    limiter = BandwidthLimiter(
+        state,
+        limit_bytes,
+        print_lock,
+        log_fn=log_sink or (ui.log if ui else None),
+    )
 
     stop_event = threading.Event()
     progress_thread = threading.Thread(
@@ -570,9 +671,19 @@ def run_bulk_download(
         t.start()
         threads.append(t)
 
+    def producer() -> None:
+        for idx, url in iter_links_range(links_path, start, end):
+            if state.is_done(idx):
+                continue
+            q.put((idx, url))
+        for _ in range(workers):
+            q.put(None)
+
+    producer_thread = threading.Thread(target=producer, daemon=True)
+    producer_thread.start()
+
     q.join()
-    for _ in threads:
-        q.put(None)
+    producer_thread.join(timeout=1)
     for t in threads:
         t.join()
     stop_event.set()
@@ -581,5 +692,4 @@ def run_bulk_download(
     if ui:
         ui.stop()
 
-    with print_lock:
-        print("Bulk download finished.")
+    log_msg("Bulk download finished.")

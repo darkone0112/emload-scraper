@@ -2,8 +2,10 @@ from __future__ import annotations
 
 import json
 import re
+import threading
+import time
 from pathlib import Path
-from typing import Optional, Sequence, Tuple, Union
+from typing import Callable, Optional, Sequence, Tuple, Union
 
 from playwright.sync_api import Page, TimeoutError, sync_playwright
 
@@ -98,6 +100,8 @@ def download_one(
     idx: Optional[int] = None,
     selector: Optional[str] = None,
     timeout_ms: int = 30000,
+    progress_cb: Optional[Callable[[int, float], None]] = None,
+    progress_interval_s: float = 0.5,
 ) -> Path:
     page.goto(url, wait_until="domcontentloaded")
 
@@ -129,8 +133,39 @@ def download_one(
     temp_path = download_dir / f"{filename}.part"
     final_path = download_dir / filename
 
-    download.save_as(temp_path)
-    failure = download.failure()
+    stop_event = threading.Event()
+    monitor_thread: Optional[threading.Thread] = None
+    if progress_cb is not None and progress_interval_s > 0:
+        def _monitor() -> None:
+            last_size = 0
+            last_ts = time.time()
+            while not stop_event.wait(progress_interval_s):
+                try:
+                    size = temp_path.stat().st_size
+                except OSError:
+                    size = 0
+                now = time.time()
+                elapsed = now - last_ts
+                if elapsed > 0:
+                    speed_mbps = ((size - last_size) / 1_000_000) / elapsed
+                    try:
+                        progress_cb(size, max(0.0, speed_mbps))
+                    except Exception:
+                        pass
+                last_size = size
+                last_ts = now
+
+        monitor_thread = threading.Thread(target=_monitor, daemon=True)
+        monitor_thread.start()
+
+    try:
+        download.save_as(temp_path)
+        failure = download.failure()
+    finally:
+        stop_event.set()
+        if monitor_thread:
+            monitor_thread.join(timeout=1)
+
     if failure:
         raise RuntimeError(f"Download failed: {failure}")
     temp_path.rename(final_path)
