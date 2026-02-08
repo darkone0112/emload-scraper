@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import json
 import re
 import threading
 import time
@@ -11,6 +10,7 @@ from playwright.sync_api import Page, TimeoutError, sync_playwright
 
 from emload_downloader.cookies import load_playwright_cookies
 from emload_downloader.ui import print_line
+from emload_downloader.links import LinkEntry, iter_link_entries
 
 EMLOAD_LINK_RE = re.compile(r"^https?://(?:www\.)?emload\.com/v2/file/[^/]+/(\d+)-")
 
@@ -78,19 +78,40 @@ def _page_has_limit_text(page: Page) -> bool:
     return any(k in lowered for k in keywords)
 
 
-def _load_link_from_json(path: Path, idx: Optional[int]) -> Tuple[Optional[int], str]:
-    data = json.loads(path.read_text(encoding="utf-8"))
-    if not isinstance(data, list) or not data:
-        raise ValueError(f"No links found in {path}")
-    if idx is not None:
-        for item in data:
-            if isinstance(item, dict) and item.get("idx") == idx:
-                return idx, item.get("url")
-        raise ValueError(f"Index {idx} not found in {path}")
-    first = data[0]
-    if isinstance(first, dict):
-        return first.get("idx"), first.get("url")
-    raise ValueError(f"Unexpected links format in {path}")
+def _load_link_entry(path: Path, idx: Optional[int]) -> LinkEntry:
+    iterator = iter_link_entries(path)
+    if idx is None:
+        try:
+            return next(iterator)
+        except StopIteration:
+            raise ValueError(f"No links found in {path}") from None
+    for entry in iterator:
+        if entry.idx == idx:
+            return entry
+    raise ValueError(f"Index {idx} not found in {path}")
+
+
+def _safe_path_component(name: str) -> Optional[str]:
+    cleaned = name.strip().replace("/", "_").replace("\\", "_")
+    cleaned = cleaned.strip(" .")
+    if not cleaned:
+        return None
+    if cleaned in {".", ".."}:
+        return None
+    return cleaned
+
+
+def _build_target_dir(base: Path, subdirs: Optional[Sequence[str]]) -> Path:
+    target = base
+    if subdirs:
+        for part in subdirs:
+            if not isinstance(part, str):
+                continue
+            safe_part = _safe_path_component(part)
+            if not safe_part:
+                continue
+            target = target / safe_part
+    return target
 
 
 def download_one(
@@ -102,6 +123,7 @@ def download_one(
     timeout_ms: int = 30000,
     progress_cb: Optional[Callable[[int, float], None]] = None,
     progress_interval_s: float = 0.5,
+    subdirs: Optional[Sequence[str]] = None,
 ) -> Path:
     page.goto(url, wait_until="domcontentloaded")
 
@@ -129,9 +151,10 @@ def download_one(
     else:
         filename = f"{idx:04d}_{suggested}"
 
-    download_dir.mkdir(parents=True, exist_ok=True)
-    temp_path = download_dir / f"{filename}.part"
-    final_path = download_dir / filename
+    target_dir = _build_target_dir(download_dir, subdirs)
+    target_dir.mkdir(parents=True, exist_ok=True)
+    temp_path = target_dir / f"{filename}.part"
+    final_path = target_dir / filename
 
     stop_event = threading.Event()
     monitor_thread: Optional[threading.Thread] = None
@@ -184,8 +207,11 @@ def run_download_one(
 ) -> Path:
     cookies = load_playwright_cookies(cookies_path)
     download_dir = Path(download_dir)
+    entry: Optional[LinkEntry] = None
     if not url and links_path:
-        idx, url = _load_link_from_json(Path(links_path), idx)
+        entry = _load_link_entry(Path(links_path), idx)
+        idx = entry.idx
+        url = entry.url
     if not url:
         raise ValueError("Provide --url or --from-links.")
 
@@ -202,6 +228,7 @@ def run_download_one(
             idx=idx,
             selector=selector,
             timeout_ms=timeout_ms,
+            subdirs=entry.path if entry else None,
         )
 
         browser.close()

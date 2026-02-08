@@ -6,7 +6,7 @@ import time
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from pathlib import Path
-from typing import Callable, Iterable, List, Optional, Tuple
+from typing import Callable, Iterable, List, Optional
 
 try:
     from rich.console import Console, Group
@@ -30,7 +30,11 @@ from playwright.sync_api import sync_playwright
 
 from emload_downloader.cookies import load_playwright_cookies
 from emload_downloader.download import BandwidthLimitError, download_one
-from emload_downloader.links import existing_downloads, iter_links_range
+from emload_downloader.links import (
+    LinkEntry,
+    existing_downloads,
+    iter_link_entries_range,
+)
 from emload_downloader.state import StateManager
 
 
@@ -307,7 +311,7 @@ class ProgressUI:
 
 def _progress_loop(
     stop_event: threading.Event,
-    q: "queue.Queue[Optional[Tuple[int, str]]]",
+    q: "queue.Queue[Optional[LinkEntry]]",
     state: StateManager,
     limiter: BandwidthLimiter,
     statuses: dict[str, WorkerStatus],
@@ -341,7 +345,7 @@ def _progress_loop(
 
 def _worker_loop(
     name: str,
-    task_queue: "queue.Queue[Optional[Tuple[int, str]]]",
+    task_queue: "queue.Queue[Optional[LinkEntry]]",
     cookies: list,
     state: StateManager,
     limiter: BandwidthLimiter,
@@ -367,7 +371,10 @@ def _worker_loop(
                 task_queue.task_done()
                 break
 
-            idx, url = item
+            entry = item
+            idx = entry.idx
+            url = entry.url
+            subdirs = entry.path
             _update_status(
                 statuses,
                 status_lock,
@@ -392,7 +399,11 @@ def _worker_loop(
                 except OSError:
                     size = 0
                 size_label = _format_size_mb_gb(size)
-                state.mark_done(idx, url, existing_path.name, size, log_download=False)
+                try:
+                    rel_name = str(existing_path.relative_to(cfg.out_dir))
+                except ValueError:
+                    rel_name = existing_path.name
+                state.mark_done(idx, url, rel_name, size, log_download=False)
                 msg = f"[{name}] skip existing idx={idx:04d} size={size_label}"
                 if ui:
                     ui.log(msg)
@@ -449,10 +460,15 @@ def _worker_loop(
                         selector=cfg.selector,
                         timeout_ms=cfg.timeout_ms,
                         progress_cb=_progress_cb,
+                        subdirs=subdirs,
                     )
                     size = path.stat().st_size
                     size_label = _format_size_mb_gb(size)
-                    state.mark_done(idx, url, path.name, size)
+                    try:
+                        rel_name = str(path.relative_to(cfg.out_dir))
+                    except ValueError:
+                        rel_name = path.name
+                    state.mark_done(idx, url, rel_name, size)
                     state.add_daily_bytes(size)
                     duration = max(0.1, time.time() - statuses[name].start_ts)
                     speed_mbps = (size / 1_000_000) / duration
@@ -560,7 +576,8 @@ def run_bulk_download(
         total = 0
         pending = 0
         already_done = 0
-        for idx, _ in iter_links_range(links_path, start, end):
+        for entry in iter_link_entries_range(links_path, start, end):
+            idx = entry.idx
             total += 1
             if state.is_done(idx):
                 already_done += 1
@@ -595,7 +612,7 @@ def run_bulk_download(
 
     existing = existing_downloads(out_dir)
     queue_max = 100
-    q: "queue.Queue[Optional[Tuple[int, str]]]" = queue.Queue(maxsize=queue_max)
+    q: "queue.Queue[Optional[LinkEntry]]" = queue.Queue(maxsize=queue_max)
     log_msg(f"Queue size: {pending} | workers: {workers}")
 
     status_lock = threading.Lock()
@@ -672,10 +689,11 @@ def run_bulk_download(
         threads.append(t)
 
     def producer() -> None:
-        for idx, url in iter_links_range(links_path, start, end):
+        for entry in iter_link_entries_range(links_path, start, end):
+            idx = entry.idx
             if state.is_done(idx):
                 continue
-            q.put((idx, url))
+            q.put(entry)
         for _ in range(workers):
             q.put(None)
 

@@ -1,25 +1,58 @@
 from __future__ import annotations
 
 import json
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterable, Iterator, List, Optional, Tuple
 
 
-def load_links(path: Path) -> List[Tuple[int, str]]:
+@dataclass(frozen=True)
+class LinkEntry:
+    idx: int
+    url: str
+    path: Tuple[str, ...] = ()
+    name: Optional[str] = None
+
+
+def _parse_link_entry(item: object) -> Optional[LinkEntry]:
+    if not isinstance(item, dict):
+        return None
+    idx = item.get("idx")
+    url = item.get("url")
+    if not isinstance(idx, int) or not isinstance(url, str):
+        return None
+    raw_path = item.get("path")
+    path: Tuple[str, ...] = ()
+    if isinstance(raw_path, list):
+        parts = []
+        for part in raw_path:
+            if isinstance(part, str):
+                stripped = part.strip()
+                if stripped:
+                    parts.append(stripped)
+        path = tuple(parts)
+    name = item.get("name")
+    clean_name = name.strip() if isinstance(name, str) else ""
+    meta_name: Optional[str] = clean_name or None
+    return LinkEntry(idx=idx, url=url, path=path, name=meta_name)
+
+
+def load_link_entries(path: Path) -> List[LinkEntry]:
     data = json.loads(path.read_text(encoding="utf-8"))
     if not isinstance(data, list):
         raise ValueError(f"Invalid links format in {path}")
-    pairs: List[Tuple[int, str]] = []
+    entries = []
     for item in data:
-        if not isinstance(item, dict):
-            continue
-        idx = item.get("idx")
-        url = item.get("url")
-        if isinstance(idx, int) and isinstance(url, str):
-            pairs.append((idx, url))
-    if not pairs:
+        entry = _parse_link_entry(item)
+        if entry is not None:
+            entries.append(entry)
+    if not entries:
         raise ValueError(f"No links found in {path}")
-    return sorted(pairs, key=lambda x: x[0])
+    return sorted(entries, key=lambda e: e.idx)
+
+
+def load_links(path: Path) -> List[Tuple[int, str]]:
+    return [(entry.idx, entry.url) for entry in load_link_entries(path)]
 
 
 def _iter_json_array(path: Path, chunk_size: int = 65536) -> Iterator[object]:
@@ -98,14 +131,16 @@ def _iter_json_array(path: Path, chunk_size: int = 65536) -> Iterator[object]:
                 pos = 0
 
 
-def iter_links(path: Path) -> Iterator[Tuple[int, str]]:
+def iter_link_entries(path: Path) -> Iterator[LinkEntry]:
     for item in _iter_json_array(path):
-        if not isinstance(item, dict):
-            continue
-        idx = item.get("idx")
-        url = item.get("url")
-        if isinstance(idx, int) and isinstance(url, str):
-            yield (idx, url)
+        entry = _parse_link_entry(item)
+        if entry is not None:
+            yield entry
+
+
+def iter_links(path: Path) -> Iterator[Tuple[int, str]]:
+    for entry in iter_link_entries(path):
+        yield (entry.idx, entry.url)
 
 
 def iter_links_range(
@@ -119,6 +154,20 @@ def iter_links_range(
         if end is not None and idx > end:
             continue
         yield (idx, url)
+
+
+def iter_link_entries_range(
+    path: Path,
+    start: Optional[int],
+    end: Optional[int],
+) -> Iterator[LinkEntry]:
+    for entry in iter_link_entries(path):
+        idx = entry.idx
+        if start is not None and idx < start:
+            continue
+        if end is not None and idx > end:
+            continue
+        yield entry
 
 
 def filter_range(
@@ -140,7 +189,7 @@ def existing_downloads(out_dir: Path) -> dict[int, Path]:
     existing: dict[int, Path] = {}
     if not out_dir.exists():
         return existing
-    for entry in out_dir.iterdir():
+    for entry in out_dir.rglob("*"):
         if not entry.is_file():
             continue
         name = entry.name
